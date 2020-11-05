@@ -1,0 +1,75 @@
+name: Check
+on: push
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      MONGO_DATABASE: mydb
+      MONGO_COLLECTION: my_collection
+      MONGO_URI: mongodb://localhost:27017/mydb
+    services:
+      mongodb:
+        image: mongo:3.6
+        ports:
+          - 27017:27017
+          - 27018:27018
+        env:
+          MONGO_INITDB_ROOT_USERNAME: admin
+          MONGO_INITDB_ROOT_PASSWORD: tiger
+          MONGO_DATABASE: mydb
+          MONGO_COLLECTION: my_collection
+          MONGO_URI: mongodb://localhost:27017/mydb
+        volumes:
+          - ${{ github.workspace }}/mongodb-data:/data/db
+          - ${{ github.workspace }}/mongodb-configdb:/data/configdb
+      mongo-express:
+        container_name: mongo-express
+        image: mongo-express
+        restart: always
+        ports:
+        - 8081:8081
+        depends_on:
+          - mongodb
+        environment:
+          ME_CONFIG_MONGODB_ADMINUSERNAME: admin
+          ME_CONFIG_MONGODB_ADMINPASSWORD: tiger
+          ME_CONFIG_MONGODB_SERVER: mongodb
+      mongoClientTemp:
+        container_name: mongoClientTemp
+        image: mongo:3.6
+        depends_on:
+        - mongodb
+        # Sleep to wait MongoDB wake up on Travis CI
+        command: >
+          /bin/bash -c
+          "sleep 15 &&
+          mongo --host mongodb -u admin -p tiger admin --eval \"db.getSiblingDB('mydb').createUser({user:'mongo_user', pwd:'dbpass', roles:[{role:'readWrite',db:'mydb'}]});\""
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up JDK 1.8
+        uses: actions/setup-java@v1
+        with:
+          java-version: 1.8
+      - name: Check
+        run: ./gradlew check --console rich --info
+      - name: Install Embulk
+        run: curl --create-dirs -o ~/.embulk/bin/embulk -L "https://dl.embulk.org/embulk-0.10.19.jar"
+      - name: Set Embulk executable
+        run: chmod +x ~/.embulk/bin/embulk
+      - run: export PATH="$HOME/.embulk/bin:$PATH"
+      - run: embulk --version
+      - name: Build a gem
+        run: ./gradlew gem
+      - name: Mongo DB
+        run: mongoimport --host 127.0.0.1 -u mongo_user -p dbpass --db $MONGO_DATABASE --collection $MONGO_COLLECTION --type json --drop src/test/resources/my_collection.jsonl
+      - run: for target in basic full id_field_name
+            do
+              embulk run -L build/gemContents src/test/resources/${target}.yml
+              cat tmp/${target}000.00.csv
+              cmp tmp/${target}000.00.csv src/test/resources/${target}_expected.csv
+            done
+      - uses: actions/upload-artifact@v2
+        if: always()
+        with:
+          name: tests
+          path: ./*/build/reports/tests/test
